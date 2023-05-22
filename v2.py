@@ -73,7 +73,10 @@ def estimate_loss():
     model.train()
     return out
 
+
 """ one head of self-attention """
+
+
 class Head(nn.Module):
 
     def __init__(self, head_size):
@@ -83,28 +86,43 @@ class Head(nn.Module):
         self.query = nn.Linear(n_embd, head_size, bias=False)
         self.value = nn.Linear(n_embd, head_size, bias=False)
         # this creates the lower triangular matrix
-        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
-
-        self.dropout = nn.Dropout(dropout)
+        self.register_buffer('tril', torch.tril(
+            torch.ones(block_size, block_size)))
+        # self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         # input of size (batch, time-step, channels)
         # output of size (batch, time-step, head size)
-        B,T,C = x.shape
+        B, T, C = x.shape
         # calc keys
         k = self.key(x)   # (B,T,hs)
         # calc queries
-        q = self.query(x) # (B,T,hs)
+        q = self.query(x)  # (B,T,hs)
         # compute attention scores ("affinities")
-        wei = q @ k.transpose(-2,-1) * k.shape[-1]**-0.5 # (B, T, hs) @ (B, hs, T) -> (B, T, T)
+        # (B, T, hs) @ (B, hs, T) -> (B, T, T)
+        wei = q @ k.transpose(-2, -1) * k.shape[-1]**-0.5
         # decoder block (makes sure future doesn't communicate with past)
-        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T)
-        wei = F.softmax(wei, dim=-1) # (B, T, T)
-        wei = self.dropout(wei)
+        wei = wei.masked_fill(
+            self.tril[:T, :T] == 0, float('-inf'))  # (B, T, T)
+        wei = F.softmax(wei, dim=-1)  # (B, T, T)
+       # wei = self.dropout(wei)
         # perform the weighted aggregation of the values
-        v = self.value(x) # (B,T,hs)
-        out = wei @ v # (B, T, T) @ (B, T, hs) -> (B, T, hs)
+        v = self.value(x)  # (B,T,hs)
+        out = wei @ v  # (B, T, T) @ (B, T, hs) -> (B, T, hs)
         return out
+
+
+""" multi-head attention """
+
+
+class MultiHeadAttention(nn.Module):
+
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+
+    def forward(self, x):
+        return torch.cat([h(x) for h in self.heads], dim=-1)
 
 
 class BigramLanguageModel(nn.Module):
@@ -112,10 +130,12 @@ class BigramLanguageModel(nn.Module):
     def __init__(self):
         super().__init__()
         # each token directly reads off the logits for the next token from a lookup table
-        self.token_embedding_table = nn.Embedding(vocab_size, n_embd) #n_embd = number of embedding dimensions
+        # n_embd = number of embedding dimensions
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
         # self-attention head
-        self.sa_head = Head(n_embd)
+        # 4, 8-dimensional self attention vectors
+        self.sa_heads = MultiHeadAttention(4, n_embd//4)
         # decoder model head
         self.ln_head = nn.Linear(n_embd, vocab_size)
 
@@ -128,12 +148,13 @@ class BigramLanguageModel(nn.Module):
         # we pluck out all rows, arrange in B x T x C
         # logits is score for next character in sequence based on individual identity of token in sequence
         # (B,T,C (C is channel which is vocab size))
-        tok_emb = self.token_embedding_table(idx) # (B, T, C)
+        tok_emb = self.token_embedding_table(idx)  # (B, T, C)
         pos_emb = self.position_embedding_table(torch.arange(T, device=device))
         # x holds token identities and positions where it occurs
         x = tok_emb + pos_emb
-        x = self.sa_head(x)
-        logits = self.ln_head(x) # (B, T, vocab_size)
+        x = self.sa_heads(x)
+        print(x.shape)
+        logits = self.ln_head(x)  # (B, T, vocab_size)
 
         if targets is None:
             loss = None
