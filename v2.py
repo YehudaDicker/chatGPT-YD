@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+torch.autograd.set_detect_anomaly(True)  # Enable anomaly detection
+
 
 # hyperparameters
 batch_size = 32  # how many independent sequences we will process in parallel
@@ -120,9 +122,51 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, head_size):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.proj = nn.Linear(n_embd, n_embd)
 
     def forward(self, x):
-        return torch.cat([h(x) for h in self.heads], dim=-1)
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        out = self.proj(out)
+        return out
+
+
+""" linear layer followed by non-linearity """
+
+
+class FeedForward(nn.Module):
+
+    def __init__(self, n_embd):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, 4 * n_embd),
+            nn.ReLU(),
+            nn.Linear(4 * n_embd, n_embd),
+        )
+
+    def forward(self, x):
+        return self.net(x)  # this is on a per-token level
+
+
+""" transformer block: communication followed by computation """
+
+
+class Block(nn.Module):
+
+    def __init__(self, n_embd, n_head):
+        super().__init__()
+        head_size = n_embd//n_head
+        self.sa = MultiHeadAttention(n_head, head_size)
+        self.ffw = FeedForward(n_embd)
+
+    def forward(self, x):
+        # added residual connections 
+        # residual connections adds more info flow
+        # this is because many activtion functions return a value 0 or close to zero, so their gradient becomes zero
+        # this causes the values to get lost
+        # residual connections maintain these values
+        x = x + self.sa(x)
+        x = x + self.ffw(x) 
+        return x
 
 
 class BigramLanguageModel(nn.Module):
@@ -136,8 +180,12 @@ class BigramLanguageModel(nn.Module):
         # self-attention head
         # 4, 8-dimensional self attention vectors
         self.sa_heads = MultiHeadAttention(4, n_embd//4)
+        self.blocks = nn.Sequential(Block(n_embd, n_head=4), Block(
+            n_embd, n_head=4), Block(n_embd, n_head=4),)
         # decoder model head
         self.ln_head = nn.Linear(n_embd, vocab_size)
+        # ffw layer
+        #self.ffw = FeedForward(n_embd)
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
@@ -151,9 +199,10 @@ class BigramLanguageModel(nn.Module):
         tok_emb = self.token_embedding_table(idx)  # (B, T, C)
         pos_emb = self.position_embedding_table(torch.arange(T, device=device))
         # x holds token identities and positions where it occurs
-        x = tok_emb + pos_emb
-        x = self.sa_heads(x)
-        print(x.shape)
+        x = tok_emb + pos_emb  # (B x T x C)
+        #x = self.sa_heads(x)  # one head of self-attention, (B x T x C)
+        #x = self.ffw(x)  # (B x T x C)
+        x = self.blocks(x)
         logits = self.ln_head(x)  # (B, T, vocab_size)
 
         if targets is None:
